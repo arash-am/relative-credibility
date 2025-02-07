@@ -4,16 +4,19 @@ from openai import OpenAI
 import networkx as nx
 import time  # you might use this to slow down API calls if needed
 
+
+
 # Set your OpenAI API key (consider loading from an env var in production)
 client = OpenAI(
-    # Defaults to os.environ.get("OPENAI_API_KEY") if not provided.
-    api_key="OPENAI_API_KEY",
+#     # Defaults to os.environ.get("OPENAI_API_KEY") if not provided.
+    api_key=os.environ.get("OPENAI_API_KEY"),
+    # "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"
 )
 
 
 def chat_gpt(prompt):
     response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
+        model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}]
     )
     return response.choices[0].message.content.strip()
@@ -29,11 +32,14 @@ Assume all the source information is correct, even if it contradicts your own kn
 Do not use any other knowledge or information beyond what is provided in the source.
 
 You must:
-1. Compare the target article strictly against the source article assuming all information in the source is true regarding Ukrain and Russia.
+1. Compare the target information strictly against the source information assuming all information in the source is true regarding Ukrain and Russia.
 2. Determine if the target information aligns with the source (i.e., no contradictions).
-   - If it alignes, return "1".
-   - If completely contradicting, return "0".
-   - If it partially aligns return a value between 0 and 1
+Return one of the tags in the following:
+1. UNRELATED: If the target information is not related to Ukrain-Russia return.
+2. CONTRADICTORY:If the traget information completly contradicts the source information
+3. PARTIALLY_CONTRADICTORY: If the target infromation partially contradict or is misleading compare to the source information
+4. PARTIALLY_ALIGNED: If the target information partially agrees with the source information, and has no contradiction.
+5. ALIGNED: If the target information completly agrees with the source information, and has no contradiction.
 
 ### Source Information Begin ###
 {source_text}
@@ -43,13 +49,12 @@ You must:
 {target_text}
 ### Target Information End ###
 
-Only consider information related to Ukrain and Russia conflict, disregard all other informations.
-Only provide the numeric score between 0 and 1 in the following format 0.0 as your output.
+First provide a sentence of your reasoning and then the label from the above definitions of: UNRELATED - CONTRADICTORY - PARTIALLY_CONTRADICTORY - PARTIALLY_ALIGNED - ALIGNED. Alwasy report in the following format:
+#Reasoning#: (a sentence of your reasoning with less than 20 words)--#Label#: (the detected label)
 """
     try:
         result = chat_gpt(prompt)
-        score = float(result)
-        return score
+        return result
     except Exception as e:
         print("Error during API call:", e)
         return None
@@ -68,8 +73,10 @@ df.loc[df['article_text'].isna(), 'article_text'] = ""
 df['combined'] = "##article title##: " + df['title'] + "\n##article text##: " + df['article_text'] + "\n"
 # Group by week and domain, concatenating the texts for each (if there are multiple articles)
 grouped = df.groupby(['week', 'domain'])['combined'].apply(lambda x: "\n\n".join(x))
-# Reshape the series into a table with weeks as rows and domains as columns.
 cross_table_text = grouped.unstack(fill_value="")
+
+reliablity_grouped = df.groupby(['week', 'domain'])['article_text'].apply(lambda x: "".join(x))
+reliablity_table = reliablity_grouped.unstack(fill_value="")
 
 # Create an output directory for the graphs (if needed)
 output_dir = "temporal_graphs"
@@ -77,7 +84,7 @@ os.makedirs(output_dir, exist_ok=True)
 
 # Process each week in the pivot table
 for week, row in cross_table_text.iterrows():
-    print(f"Processing week {week}...")
+    print("*"*50,f"Processing week {week}...","*"*50)
     # Create an empty directed graph for this week
     G = nx.DiGraph()
     # Get the list of domains (columns)
@@ -90,6 +97,10 @@ for week, row in cross_table_text.iterrows():
     # For each ordered pair of domains (i, j) with i != j, if both have non-empty articles, compare them.
     for domain_i in domains:
         text_i = row[domain_i].strip()
+        if not reliablity_table.loc[week][domain_i]:
+            source_reliablity="S_NO"
+        else:
+            source_reliablity="S_YES"
         if not text_i:  # Skip if domain_i has no article this week.
             continue
         for domain_j in domains:
@@ -100,15 +111,16 @@ for week, row in cross_table_text.iterrows():
                 continue
 
             # Compare from domain_i to domain_j
-            score = compare_articles(source_text=text_i, target_text=text_j)
-            if score is not None:
-                print(f"  Edge from {domain_i} -> {domain_j} - score: {score}")
-                G.add_edge(domain_i, domain_j, weight=score)
-            # else:
-            #     print(f"  Could not compare {domain_i} -> {domain_j}. No edge added.")
+
             
-            # Optional: slow down API calls to respect rate limits
-            # time.sleep(1)  # adjust or remove as necessary
+            if not reliablity_table.loc[week][domain_j]:
+                    target_reliablity="T_NO"
+            else:
+                    target_reliablity="T_YES"
+            result = compare_articles(source_text=text_i, target_text=text_j)
+            if result is not None:
+                print(f"  Edge from {domain_i} -> {domain_j} - score: {result},\t reliablity: {source_reliablity+','+target_reliablity}")
+                G.add_edge(domain_i, domain_j,verdict=result,reliablity=source_reliablity+','+target_reliablity)
     
     # Save the directed graph for this week to a file (using GEXF format)
     graph_filename = os.path.join(output_dir, f"temporal_graph_week_{week[:10]}.gexf")
