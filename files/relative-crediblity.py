@@ -10,7 +10,6 @@ import time  # you might use this to slow down API calls if needed
 client = OpenAI(
 #     # Defaults to os.environ.get("OPENAI_API_KEY") if not provided.
     api_key=os.environ.get("OPENAI_API_KEY"),
-    
 )
 
 
